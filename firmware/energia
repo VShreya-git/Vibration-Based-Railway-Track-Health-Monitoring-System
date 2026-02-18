@@ -1,0 +1,341 @@
+// FINAL: CC3200 analog-accel logger + forwarder (GPS/dummy) — sends `value` and `t` for forwarder.py
+// X -> P60 (A3), Y -> P59 (A2), Z -> P58 (A1)
+// Commands: d=dump, c=clear, s=resend log, p=print last coords
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <math.h>
+
+// ===== CONFIG =====
+char ssid[] = "Mi 10T";
+char pass[] = "januisgoat";
+
+const char* server_base = "192.168.43.41"; // forwarder PC IP
+const uint16_t server_port = 5000;
+const char* server_path = "/notify";
+
+const unsigned long SAMPLE_INTERVAL = 5000UL;        // ms between samples
+const unsigned long MIN_NOTIFY_INTERVAL = 30UL*1000UL; // ms between notifications
+const float THRESHOLD = 5.300f; // threshold in g (change if needed)
+const char* DEVICE_ID = "CC3200-1";
+
+const long GPS_BAUD = 9600; // GPS baud
+// --------------------
+
+// Analog pin mapping (you said X->P60, Y->P59, Z->P58)
+const int PIN_AX = A3; // P60 -> A3
+const int PIN_AY = A2; // P59 -> A2
+const int PIN_AZ = A1; // P58 -> A1
+// ADC / sensor constants (adjust for your sensor)
+const float ADC_MAX = 4095.0f;      // 12-bit ADC
+const float VREF = 3.3f;            // reference voltage
+const float ZERO_VOLT = VREF/2.0f; // zero-g voltage (approx)
+const float SENSITIVITY_V_PER_G = 0.330f; // V per g (ADXL335 typical)
+
+// Dummy GPS center around VIT Chennai (Kelambakkam)
+const float DUMMY_LAT_CENTER = 12.8340f;
+const float DUMMY_LON_CENTER = 80.1025f;
+
+// ---------------- state & types ----------------
+WiFiClient client;
+unsigned long lastSample = 0;
+unsigned long lastNotify = 0 - MIN_NOTIFY_INTERVAL;
+
+struct LogEntry {
+  unsigned long t_ms;
+  float mag;
+  float ax, ay, az;
+  String lat;
+  String lon;
+};
+const int LOG_CAP = 200;
+LogEntry logBuf[LOG_CAP];
+int logHead = 0;
+int logCount = 0;
+void addLog(unsigned long t, float mag, float ax, float ay, float az, const String &lat, const String &lon) {
+  logBuf[logHead].t_ms = t;
+  logBuf[logHead].mag = mag;
+  logBuf[logHead].ax = ax;
+  logBuf[logHead].ay = ay;
+  logBuf[logHead].az = az;
+  logBuf[logHead].lat = lat;
+  logBuf[logHead].lon = lon;
+  logHead = (logHead + 1) % LOG_CAP;
+  if (logCount < LOG_CAP) logCount++;
+}
+void clearLog() { logHead = 0; logCount = 0; }
+
+void dumpLog() {
+  Serial.println(F("---- EVENT LOG (oldest -> newest) ----"));
+  int start = (logHead - logCount + LOG_CAP) % LOG_CAP;
+  for (int i = 0; i < logCount; ++i) {
+    LogEntry &e = logBuf[(start + i) % LOG_CAP];
+    Serial.print(i+1); Serial.print(": t(ms)="); Serial.print(e.t_ms);
+    Serial.print(", mag="); Serial.print(e.mag,4);
+    Serial.print(", ax="); Serial.print(e.ax,4);
+    Serial.print(", ay="); Serial.print(e.ay,4);
+    Serial.print(", az="); Serial.print(e.az,4);
+    Serial.print(", lat="); Serial.print(e.lat);
+    Serial.print(", lon="); Serial.println(e.lon);
+  }
+  Serial.println(F("---- END LOG ----"));
+}
+// Minimal URL-encode for numbers and common chars
+String urlEncode(const String &s) {
+  String out = "";
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if ( ('0' <= c && c <= '9') || c=='.' || c=='-' || c==',' || c==':' ) out += c;
+    else if (c == ' ') out += '+';
+    else {
+      char buf[8];
+      snprintf(buf, sizeof(buf), "%%%02X", (uint8_t)c);
+      out += String(buf);
+    }
+  }
+  return out;
+}
+void connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, pass);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000UL) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("Connected, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi connect timeout");
+  }
+}
+// ---- sendNotifyImmediate updated to include value & t for forwarder.py ----
+void sendNotifyImmediate(unsigned long t_ms, float mag, float ax, float ay, float az, const String &lat, const String &lon) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected; skipping notify");
+    return;
+  }
+  if (!client.connect(server_base, server_port)) {
+    Serial.println("Connection to forwarder failed");
+    return;
+  }
+  // Build GET with both forwarder-friendly keys and detailed keys
+  String path = String(server_path) + "?dev=" + DEVICE_ID;
+  // include canonical 'value' and 't' for your forwarder.py
+  path += "&value=" + String(mag,4) + "&t=" + String(t_ms);
+  // include the detailed fields too (backwards compatible)
+  path += "&mag=" + String(mag,4) + "&ax=" + String(ax,4) + "&ay=" + String(ay,4) + "&az=" + String(az,4);
+  if (lat.length()) path += "&lat=" + urlEncode(lat);
+  if (lon.length()) path += "&lon=" + urlEncode(lon);
+
+  client.print(String("GET ") + path + " HTTP/1.1\r\n" +
+               "Host: " + server_base + "\r\n" +
+               "Connection: close\r\n\r\n");
+
+  unsigned long tout = millis();
+  while (client.connected() && millis() - tout < 3000) {
+    while (client.available()) {
+      char c = client.read();
+      Serial.write(c);
+      tout = millis();
+    }
+  }
+  client.stop();
+  Serial.println("\nNotify sent.");
+}
+// ---------------- GPS (Serial1) ----------------
+String gpsLine = "";
+String lastLat = "";
+String lastLon = "";
+
+String nmeaToDecimal(const String &nmeaDeg, const String &hem) {
+  if (nmeaDeg.length() < 4) return "";
+  int dot = nmeaDeg.indexOf('.');
+  if (dot < 0) return "";
+  int degDigits = (dot > 4) ? 3 : 2;
+  String degStr = nmeaDeg.substring(0, degDigits);
+  String minStr = nmeaDeg.substring(degDigits);
+  float deg = degStr.toFloat();
+  float minutes = minStr.toFloat();
+  float dec = deg + (minutes / 60.0f);
+  if (hem == "S" || hem == "W") dec = -dec;
+  char buf[20]; dtostrf(dec, 0, 6, buf);
+  return String(buf);
+}
+void processNMEALine(const String &line) {
+  Serial.print("NMEA: "); Serial.println(line);
+  if (line.startsWith("$GPGGA") || line.startsWith("$GNGGA")) {
+    String toks[12]; int tc=0, start=0;
+    for (int i=0;i<line.length() && tc<12;i++) {
+      if (line.charAt(i)==',') { toks[tc++] = line.substring(start, i); start = i+1; }
+    }
+    if (tc < 12 && start < line.length()) toks[tc++] = line.substring(start);
+    if (tc > 5) {
+      String latN = toks[2], latH = toks[3], lonN = toks[4], lonH = toks[5];
+      String latD = nmeaToDecimal(latN, latH);
+      String lonD = nmeaToDecimal(lonN, lonH);
+      if (latD.length() && lonD.length()) {
+        lastLat = latD; lastLon = lonD;
+        Serial.print("Parsed lat="); Serial.print(lastLat); Serial.print(" lon="); Serial.println(lastLon);
+      }
+    }
+  } else if (line.startsWith("$GPRMC")) {
+    String toks[12]; int tc=0, start=0;
+    for (int i=0;i<line.length() && tc<12;i++) {
+      if (line.charAt(i)==',') { toks[tc++] = line.substring(start, i); start = i+1; }
+    }
+    if (tc < 12 && start < line.length()) toks[tc++] = line.substring(start);
+    if (tc > 6) {
+      String latN = toks[3], latH = toks[4], lonN = toks[5], lonH = toks[6];
+      String latD = nmeaToDecimal(latN, latH);
+      String lonD = nmeaToDecimal(lonN, lonH);
+      if (latD.length() && lonD.length()) {
+        lastLat = latD; lastLon = lonD;
+        Serial.print("Parsed lat="); Serial.print(lastLat); Serial.print(" lon="); Serial.println(lastLon);
+      }
+      .
+    }
+  }
+}
+void readGPS() {
+  #if defined(SERIAL1)
+    while (Serial1.available() > 0) {
+      char c = Serial1.read();
+      Serial.write(c);
+      if (c == '\r') continue;
+      if (c == '\n') {
+        if (gpsLine.length() > 4) processNMEALine(gpsLine);
+        gpsLine = "";
+      } else {
+        gpsLine += c;
+        if (gpsLine.length() > 400) gpsLine = "";
+      }
+    }
+  #else
+    while (Serial.available() > 0) {
+      char c = Serial1.read();
+      Serial.write(c);
+      if (c == '\r') continue;
+      if (c == '\n') {
+        if (gpsLine.length() > 4) processNMEALine(gpsLine);
+        gpsLine = "";
+      } else {
+        gpsLine += c;
+        if (gpsLine.length() > 400) gpsLine = "";
+      }
+    }
+  }
+  #endif
+}
+
+void getLatLon(String &latOut, String &lonOut) {
+  if (lastLat.length() && lastLon.length()) {
+    latOut = lastLat; lonOut = lastLon; return;
+  }
+  float jitterLat = ((float)random(-100,101)) / 1000000.0f; // ±0.0001
+  float jitterLon = ((float)random(-100,101)) / 1000000.0f;
+  float lat = DUMMY_LAT_CENTER + jitterLat;
+  float lon = DUMMY_LON_CENTER + jitterLon;
+  char buf1[16], buf2[16];
+  dtostrf(lat, 0, 6, buf1);
+  dtostrf(lon, 0, 6, buf2);
+  latOut = String(buf1); lonOut = String(buf2);
+}
+
+// resend implementation (called by 's')
+void resendAllLogToForwarder() {
+  Serial.println("Resending entire log to forwarder (one request per entry)...");
+  int start = (logHead - logCount + LOG_CAP) % LOG_CAP;
+  for (int i = 0; i < logCount; ++i) {
+    LogEntry &e = logBuf[(start + i) % LOG_CAP];
+    // call sendNotifyImmediate with timestamp + value etc.
+    sendNotifyImmediate(e.t_ms, e.mag, e.ax, e.ay, e.az, e.lat, e.lon);
+    delay(200); // small gap
+  }
+  Serial.println("Resend finished.");
+}
+
+
+// read analog axis (convert ADC -> volts -> g)
+float readAxisG(int pin) {
+  int raw = analogRead(pin); // 0..4095
+  float v = (raw / ADC_MAX) * VREF;
+  float g = (v - ZERO_VOLT) / SENSITIVITY_V_PER_G;
+  return g;
+}
+// --------------- setup & loop ---------------
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("\nCC3200 analog-accel logger + forwarder (GPS/dummy)");
+  pinMode(PIN_AX, INPUT);
+  pinMode(PIN_AY, INPUT);
+  pinMode(PIN_AZ, INPUT);
+
+  #if defined(SERIAL1)
+    Serial1.begin(GPS_BAUD);
+    Serial.println("Serial1 (GPS) started at " + String(GPS_BAUD));
+  #else
+    Serial.println("Serial1 not defined -> fallback to Serial for GPS input");
+  #endif
+
+  randomSeed(analogRead(A0));
+  connectWiFi();
+  lastSample = millis();
+  lastNotify = 0 - MIN_NOTIFY_INTERVAL;
+}
+
+void loop() {
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'd' || c == 'D') dumpLog();
+    else if (c == 'c' || c == 'C') { clearLog(); Serial.println("Log cleared."); }
+    else if (c == 's' || c == 'S') resendAllLogToForwarder();
+    else if (c == 'p' || c == 'P') {
+      Serial.print("Parsed GPS lat="); Serial.print(lastLat); Serial.print(" lon="); Serial.println(lastLon);
+      String dl, dl2; getLatLon(dl, dl2);
+      Serial.print("Effective lat="); Serial.print(dl); Serial.print(" lon="); Serial.println(dl2);
+    }
+  }
+}
+// read GPS
+  readGPS();
+
+  if (WiFi.status() != WL_CONNECTED) connectWiFi();
+
+  unsigned long now = millis();
+  if (now - lastSample >= SAMPLE_INTERVAL) {
+    lastSample = now;
+
+    float ax = readAxisG(PIN_AX);
+    float ay = readAxisG(PIN_AY);
+    float az = readAxisG(PIN_AZ);
+    float mag = sqrt(ax*ax + ay*ay + az*az);
+
+    Serial.print("ax="); Serial.print(ax,4);
+    Serial.print(" ay="); Serial.print(ay,4);
+    Serial.print(" az="); Serial.print(az,4);
+    Serial.print(" mag="); Serial.println(mag,4);
+    String latSend, lonSend;
+    getLatLon(latSend, lonSend);
+
+    // store in RAM log
+    addLog(now, mag, ax, ay, az, latSend, lonSend);
+
+    // check threshold (immediate notify) — now sends 'value' and 't' so forwarder logs them
+    if (mag > THRESHOLD) {
+      Serial.println(">>> MAG THRESHOLD EXCEEDED - sending notify");
+      if (now - lastNotify >= MIN_NOTIFY_INTERVAL) {
+        lastNotify = now;
+        sendNotifyImmediate(now, mag, ax, ay, az, latSend, lonSend);
+      } else {
+        unsigned long wait = MIN_NOTIFY_INTERVAL - (now - lastNotify);
+        Serial.print("Notify suppressed by rate-limit (next in s): "); Serial.println(wait/1000);
+      }
+    }
+  }
+}
