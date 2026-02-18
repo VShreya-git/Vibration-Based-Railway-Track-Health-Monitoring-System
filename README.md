@@ -33,3 +33,57 @@ Log timestamp, speed, vibration, and GPS location to SD card.
 •	Otherwise, continue routine monitoring.
 
 This ensures dual redundancy: wireless alerting + local blackbox storage.
+
+### Firmware Implementation
+
+Developed using Energia (C/C++).
+
+Libraries used:
+
+•	WiFi.h
+
+•	WiFiClient.h
+
+•	math.h
+
+•	UART interface for GPS
+
+•	SPI interface for SD logging
+
+The firmware handles:
+
+•	ADC sampling
+
+•	RMS-like vibration magnitude calculation
+
+•	Threshold comparison
+
+•	HTTP GET alert generation
+
+•	Structured log storage
+
+### Server Implementation
+
+A lightweight Python Flask server:
+
+•	Receives HTTP alerts
+
+•	Logs events to file
+
+•	Sends Telegram notifications
+
+•	Maintains event history
+
+•	Enables scalable integration with dashboards or cloud systems.
+
+### Results & Observations
+
+•	GPS provides reliable outdoor speed/location.
+
+•	CC3200 handles concurrent tasks without performance degradation.
+
+•	Alerts are transmitted instantly on threshold violation.
+
+•	SD card logging ensures data persistence during network failure.
+
+The system demonstrates reliable real-time monitoring suitable for railway safety applications.
