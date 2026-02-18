@@ -18,21 +18,23 @@ This project implements a real-time railway safety monitoring system using the T
 
 ### Working Principle
 
-•	Continuously read acceleration and GPS data.
+1. Start the system and initialize all sensors, Wi-Fi, and SD card modules. 
 
-•	Compute vibration magnitude and monitor train speed.
+2. Read sensor values from accelerometer and piezo sensors. 
 
-•	Compare values against predefined thresholds.
+3. Acquire GPS data (speed, latitude, longitude). 
 
-•	If threshold exceeded:
+4. Check conditions: 
+o If speed > threshold → set overspeed_flag = true. 
+o If vibration > threshold → set vibration_flag = true. 
 
-Send HTTP alert via Wi-Fi.
+5. If either flag is true: 
+o Prepare alert message with all details. 
+o Send alert to remote server via Wi-Fi. 
+o Log data with timestamp into the SD card. 
 
-Log timestamp, speed, vibration, and GPS location to SD card.
-
-•	Otherwise, continue routine monitoring.
-
-This ensures dual redundancy: wireless alerting + local blackbox storage.
+6. If both conditions are normal: 
+o Continue logging routine readings for reference.
 
 ### Firmware Implementation
 
@@ -40,27 +42,11 @@ Developed using Energia (C/C++).
 
 Libraries used:
 
-•	WiFi.h
+•	WiFi.h -  for establishing and managing Wi-Fi connections between the CC3200 and a wireless network. 
 
-•	WiFiClient.h
+•	WiFiClient.h -  for creating a client instance that can send alert messages and data packets to a remote server or cloud platform using standard protocols such as HTTP or TCP. 
 
-•	math.h
-
-•	UART interface for GPS
-
-•	SPI interface for SD logging
-
-The firmware handles:
-
-•	ADC sampling
-
-•	RMS-like vibration magnitude calculation
-
-•	Threshold comparison
-
-•	HTTP GET alert generation
-
-•	Structured log storage
+•	math.h - for performing essential mathematical operations, such as calculating RMS values, averages, and filtering raw accelerometer data to identify vibration magnitude.
 
 ### Server Implementation
 
