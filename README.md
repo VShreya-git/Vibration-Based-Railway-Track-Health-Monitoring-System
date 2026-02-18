@@ -18,23 +18,23 @@ This project implements a real-time railway safety monitoring system using the T
 
 ### Working Principle
 
-1. Start the system and initialize all sensors, Wi-Fi, and SD card modules. 
+•	Start the system and initialize all sensors, Wi-Fi, and SD card modules. 
 
-2. Read sensor values from accelerometer and piezo sensors. 
+•	Read sensor values from accelerometer and piezo sensors. 
 
-3. Acquire GPS data (speed, latitude, longitude). 
+•	Acquire GPS data (speed, latitude, longitude). 
 
-4. Check conditions: 
-o If speed > threshold → set overspeed_flag = true. 
-o If vibration > threshold → set vibration_flag = true. 
+•	Check conditions: 
+•	If speed > threshold → set overspeed_flag = true. 
+•	If vibration > threshold → set vibration_flag = true. 
 
-5. If either flag is true: 
-o Prepare alert message with all details. 
-o Send alert to remote server via Wi-Fi. 
-o Log data with timestamp into the SD card. 
+•	If either flag is true: 
+•	Prepare alert message with all details. 
+•	Send alert to remote server via Wi-Fi. 
+•	Log data with timestamp into the SD card. 
 
-6. If both conditions are normal: 
-o Continue logging routine readings for reference.
+•	If both conditions are normal: 
+•	Continue logging routine readings for reference.
 
 ### Firmware Implementation
 
